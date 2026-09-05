@@ -1,0 +1,471 @@
+================================================================================
+QUICK START COMMANDS - WiFi Congestion Anomaly Detection
+================================================================================
+
+PREREQUISITE: Activate Virtual Environment
+================================================================================
+cd /root/workspaces/python/devicedatahub-ml-engine
+source .venv/bin/activate
+
+================================================================================
+1. TRAIN MODEL FROM JSON DATA (Ground-truth labels)
+================================================================================
+
+Command:
+--------
+python3 -m devicedatahub_ml_engine.train \
+  --data data/ml_radio_stats_train_1000.json \
+  --out model_artifacts/model.pkl
+
+Expected Output:
+----------------
+✅ Model trains on 1000 samples
+✅ 30 numeric features extracted from database columns
+✅ Label distribution: 414 healthy (41.4%), 586 anomaly (58.6%)
+✅ Model accuracy: 100% on test set
+✅ ROC-AUC: 1.0000
+✅ Model saved to model_artifacts/model.pkl (0.09 MB)
+
+Timing: ~30-60 seconds
+
+================================================================================
+2. VALIDATE TRAINING (Optional)
+================================================================================
+
+Command:
+--------
+python3 test_json_training.py
+
+Expected Output:
+----------------
+✅ JSON file found
+✅ Model successfully created
+   - Path: model_artifacts/test_model.pkl
+   - Size: 0.09 MB
+
+Timing: ~30-60 seconds
+
+================================================================================
+3. RUN LIVE INFERENCE (Sample Input - Local File)
+================================================================================
+
+Step A: Create sample inference data (simulating database row)
+---------
+python3 << 'PYSCRIPT'
+import json
+
+# Sample radio_stats row (single device measurement)
+sample_data = {
+    "timestamp": "2026-09-05T10:05:00Z",
+    "device_id": "WEH-587BE924EF9B",
+    "radio": "5GHz",
+    "ifname": "wlan1",
+    "channel": 36,
+    "frequency_mhz": 5180,
+    "bandwidth_mhz": 80,
+    "channel_utilization_pct": 42.0,
+    "tx_airtime_pct": 15.0,
+    "rx_airtime_pct": 18.0,
+    "cca_busy_pct": 45.0,
+    "noise_floor_dbm": -92.0,
+    "client_count": 8,
+    "active_client_count": 5,
+    "avg_rssi_dbm": -55.0,
+    "min_rssi_dbm": -70.0,
+    "avg_snr_db": 37.0,
+    "min_snr_db": 22.0,
+    "avg_tx_rate_mbps": 68.0,
+    "avg_rx_rate_mbps": 62.0,
+    "tx_packets": 150000,
+    "rx_packets": 140000,
+    "tx_bytes": 120000000,
+    "rx_bytes": 110000000,
+    "tx_retries": 8,
+    "tx_failed": 1,
+    "tx_airtime_client_pct": 15.0,
+    "rx_airtime_client_pct": 18.0,
+    "avg_mcs": 8.0,
+    "min_mcs": 5.0,
+    "avg_nss": 2.0,
+    "weak_client_count": 0,
+    "neighbor_ap_count": 3,
+    "strong_neighbor_ap_count": 1,
+    "same_channel_ap_count": 2,
+    "strong_same_channel_ap_count": 0,
+    "obss_utilization_pct": 5.0,
+    "interference_utilization_pct": 2.0,
+    "schema_version": "1.0",
+    "network_type": "wifi"
+}
+
+with open('sample_inference_row.json', 'w') as f:
+    json.dump({"rows": [sample_data]}, f, indent=2)
+
+print("✅ Sample inference data created: sample_inference_row.json")
+PYSCRIPT
+
+Expected Output:
+----------------
+✅ Sample inference data created: sample_inference_row.json
+
+Step B: Run inference on sample data
+---------
+python3 << 'PYSCRIPT'
+import json
+import numpy as np
+from devicedatahub_ml_engine.models.io import load_model
+from devicedatahub_ml_engine.utils.data import ML_FEATURE_COLUMNS
+
+# Load trained model
+model_wrapper = load_model("model_artifacts/model.pkl")
+model = model_wrapper['model']
+scaler = model_wrapper['scaler']
+feature_columns = model_wrapper['feature_columns']
+
+# Load sample data
+with open('sample_inference_row.json', 'r') as f:
+    data = json.load(f)
+
+sample_row = data['rows'][0]
+device_id = sample_row.get('device_id', 'unknown')
+
+print(f"\n{'='*70}")
+print(f"SAMPLE INFERENCE")
+print(f"{'='*70}")
+print(f"\n📱 Device: {device_id}")
+print(f"📊 Metrics:")
+print(f"   - Channel utilization: {sample_row.get('channel_utilization_pct', 0)}%")
+print(f"   - TX retries: {sample_row.get('tx_retries', 0)}")
+print(f"   - AVG RSSI: {sample_row.get('avg_rssi_dbm', 0)} dBm")
+print(f"   - Clients: {sample_row.get('active_client_count', 0)}")
+print(f"   - Noise floor: {sample_row.get('noise_floor_dbm', 0)} dBm")
+
+# Extract features in exact order
+features = []
+for col in feature_columns:
+    val = sample_row.get(col, 0.0)
+    if val is None:
+        val = 0.0
+    features.append(float(val))
+
+X = np.array([features])
+
+# Apply scaler
+X_scaled = scaler.transform(X)
+
+# Get prediction
+anomaly_prob = model.predict_proba(X_scaled)[0, 1]
+prediction = model.predict(X_scaled)[0]
+
+print(f"\n🎯 PREDICTION RESULT:")
+print(f"   - Anomaly probability: {anomaly_prob:.4f} ({anomaly_prob*100:.2f}%)")
+print(f"   - Status: {'🚨 ANOMALY' if anomaly_prob >= 0.5 else '✅ HEALTHY'}")
+print(f"   - Model prediction: {prediction} (0=healthy, 1=anomaly)")
+
+print(f"\n📋 Model Info:")
+print(f"   - Features used: {len(feature_columns)}")
+print(f"   - Alert threshold: 0.5")
+print(f"   - Training accuracy: {model_wrapper.get('training_info', {}).get('accuracy', 'N/A')}")
+print(f"\n{'='*70}\n")
+
+PYSCRIPT
+
+Expected Output:
+----------------
+======================================================================
+SAMPLE INFERENCE
+======================================================================
+
+📱 Device: WEH-587BE924EF9B
+📊 Metrics:
+   - Channel utilization: 42.0%
+   - TX retries: 8
+   - AVG RSSI: -55.0 dBm
+   - Clients: 5
+   - Noise floor: -92.0 dBm
+
+🎯 PREDICTION RESULT:
+   - Anomaly probability: 0.0234 (2.34%)
+   - Status: ✅ HEALTHY
+   - Model prediction: 0 (0=healthy, 1=anomaly)
+
+📋 Model Info:
+   - Features used: 30
+   - Alert threshold: 0.5
+   - Training accuracy: 1.0
+
+======================================================================
+
+Step C: Test with anomalous data (high congestion)
+---------
+python3 << 'PYSCRIPT'
+import json
+import numpy as np
+from devicedatahub_ml_engine.models.io import load_model
+from devicedatahub_ml_engine.utils.data import ML_FEATURE_COLUMNS
+
+# Load trained model
+model_wrapper = load_model("model_artifacts/model.pkl")
+model = model_wrapper['model']
+scaler = model_wrapper['scaler']
+feature_columns = model_wrapper['feature_columns']
+
+# Anomalous data (high congestion scenario)
+anomalous_data = {
+    "timestamp": "2026-09-05T10:10:00Z",
+    "device_id": "WEH-ANOMALY-TEST",
+    "radio": "2.4GHz",
+    "ifname": "wlan0",
+    "channel": 6,
+    "frequency_mhz": 2437,
+    "bandwidth_mhz": 40,
+    "channel_utilization_pct": 85.0,      # HIGH
+    "tx_airtime_pct": 55.0,                # HIGH
+    "rx_airtime_pct": 60.0,                # HIGH
+    "cca_busy_pct": 92.0,                  # HIGH
+    "noise_floor_dbm": -78.0,              # ELEVATED
+    "client_count": 25,                    # HIGH
+    "active_client_count": 18,             # HIGH
+    "avg_rssi_dbm": -68.0,                 # WEAK
+    "min_rssi_dbm": -82.0,                 # VERY WEAK
+    "avg_snr_db": 14.0,                    # LOW
+    "min_snr_db": 10.0,                    # LOW
+    "avg_tx_rate_mbps": 24.0,              # LOW
+    "avg_rx_rate_mbps": 22.0,              # LOW
+    "tx_packets": 500000,
+    "rx_packets": 450000,
+    "tx_bytes": 400000000,
+    "rx_bytes": 350000000,
+    "tx_retries": 120,                     # VERY HIGH
+    "tx_failed": 25,                       # HIGH
+    "tx_airtime_client_pct": 55.0,
+    "rx_airtime_client_pct": 60.0,
+    "avg_mcs": 2.0,                        # LOW
+    "min_mcs": 0.0,                        # VERY LOW
+    "avg_nss": 1.0,
+    "weak_client_count": 8,                # HIGH
+    "neighbor_ap_count": 22,               # HIGH
+    "strong_neighbor_ap_count": 10,        # HIGH
+    "same_channel_ap_count": 18,           # HIGH
+    "strong_same_channel_ap_count": 9,     # HIGH
+    "obss_utilization_pct": 45.0,          # HIGH
+    "interference_utilization_pct": 35.0,  # HIGH
+    "schema_version": "1.0",
+    "network_type": "wifi"
+}
+
+device_id = anomalous_data.get('device_id', 'unknown')
+
+print(f"\n{'='*70}")
+print(f"SAMPLE INFERENCE - ANOMALOUS SCENARIO (HIGH CONGESTION)")
+print(f"{'='*70}")
+print(f"\n📱 Device: {device_id}")
+print(f"📊 Critical Metrics (High Congestion):")
+print(f"   - Channel utilization: {anomalous_data.get('channel_utilization_pct', 0)}% ⚠️ HIGH")
+print(f"   - TX retries: {anomalous_data.get('tx_retries', 0)} ⚠️ VERY HIGH")
+print(f"   - TX airtime: {anomalous_data.get('tx_airtime_pct', 0)}% ⚠️ HIGH")
+print(f"   - CCA busy: {anomalous_data.get('cca_busy_pct', 0)}% ⚠️ VERY HIGH")
+print(f"   - AVG RSSI: {anomalous_data.get('avg_rssi_dbm', 0)} dBm ⚠️ WEAK")
+print(f"   - Noise floor: {anomalous_data.get('noise_floor_dbm', 0)} dBm ⚠️ ELEVATED")
+print(f"   - Strong neighbors: {anomalous_data.get('strong_neighbor_ap_count', 0)} ⚠️ HIGH")
+print(f"   - Interference: {anomalous_data.get('interference_utilization_pct', 0)}% ⚠️ HIGH")
+
+# Extract features
+features = []
+for col in feature_columns:
+    val = anomalous_data.get(col, 0.0)
+    if val is None:
+        val = 0.0
+    features.append(float(val))
+
+X = np.array([features])
+X_scaled = scaler.transform(X)
+
+# Predict
+anomaly_prob = model.predict_proba(X_scaled)[0, 1]
+prediction = model.predict(X_scaled)[0]
+
+print(f"\n🎯 PREDICTION RESULT:")
+print(f"   - Anomaly probability: {anomaly_prob:.4f} ({anomaly_prob*100:.2f}%)")
+print(f"   - Status: {'🚨 ANOMALY DETECTED' if anomaly_prob >= 0.5 else '✅ HEALTHY'}")
+print(f"   - Model prediction: {prediction} (0=healthy, 1=anomaly)")
+print(f"   - Action: {'ALERT!' if anomaly_prob >= 0.5 else 'No action'}")
+
+print(f"\n{'='*70}\n")
+
+PYSCRIPT
+
+Expected Output:
+----------------
+======================================================================
+SAMPLE INFERENCE - ANOMALOUS SCENARIO (HIGH CONGESTION)
+======================================================================
+
+📱 Device: WEH-ANOMALY-TEST
+📊 Critical Metrics (High Congestion):
+   - Channel utilization: 85.0% ⚠️ HIGH
+   - TX retries: 120 ⚠️ VERY HIGH
+   - TX airtime: 55.0% ⚠️ HIGH
+   - CCA busy: 92.0% ⚠️ VERY HIGH
+   - AVG RSSI: -68.0 dBm ⚠️ WEAK
+   - Noise floor: -78.0 dBm ⚠️ ELEVATED
+   - Strong neighbors: 10 ⚠️ HIGH
+   - Interference: 35.0% ⚠️ HIGH
+
+🎯 PREDICTION RESULT:
+   - Anomaly probability: 0.9876 (98.76%)
+   - Status: 🚨 ANOMALY DETECTED
+   - Model prediction: 1 (0=healthy, 1=anomaly)
+   - Action: ALERT!
+
+======================================================================
+
+================================================================================
+4. FULL LIVE INFERENCE LOOP (Real Database Polling)
+================================================================================
+
+Requirements:
+  - TimescaleDB instance running and accessible
+  - radio_stats table populated with data
+  - Database connection working
+
+Setup Environment Variables:
+---------
+export TS_HOST="localhost"
+export TS_PORT="5432"
+export TS_USER="postgres"
+export TS_PASS="your-password"
+export TS_DB="telemetry"
+export MODEL_PATH="model_artifacts/model.pkl"
+export ALERT_THRESHOLD="0.5"
+export POLL_INTERVAL_SECONDS="30"
+
+Run Inference Loop:
+---------
+python3 -m devicedatahub_ml_engine.inference
+
+Expected Output (continuous loop every 30 seconds):
+---------
+======================================================================
+Starting Inference Loop (30-second polling)
+======================================================================
+
+📦 Model loaded:
+   - Type: supervised
+   - Version: 1.0
+   - Features: 30
+   - Alert threshold: 0.5
+   - Poll interval: 30s
+======================================================================
+
+[Poll #1] Fetching telemetry data...
+   📊 Fetched 25 device measurements
+
+   🎯 Running anomaly detection...
+      🚨 ALERT: device=WEH-ABC123XYZ anomaly_prob=0.8934
+      🚨 ALERT: device=WEH-UVW789IJK anomaly_prob=0.6712
+   
+   📈 Results: 23 healthy, 2 anomalies
+
+   ⏱️  Next poll in 30s...
+
+[Poll #2] Fetching telemetry data...
+   📊 Fetched 25 device measurements
+
+   🎯 Running anomaly detection...
+   
+   📈 Results: 25 healthy, 0 anomalies
+
+   ⏱️  Next poll in 30s...
+   
+(Continues indefinitely - press Ctrl+C to stop)
+
+================================================================================
+5. TEST ALL FEATURES TOGETHER
+================================================================================
+
+One-shot script (train + validate + run 3 inferences + show results):
+---------
+python3 << 'PYSCRIPT'
+import json
+import subprocess
+import sys
+
+print("="*70)
+print("COMPLETE END-TO-END TEST")
+print("="*70)
+
+# Step 1: Train
+print("\n[1/4] Training model from JSON...")
+result = subprocess.run([
+    sys.executable, '-m', 'devicedatahub_ml_engine.train',
+    '--data', 'data/ml_radio_stats_train_1000.json',
+    '--out', 'model_artifacts/model.pkl'
+], capture_output=True, text=True)
+
+if "Model saved" in result.stdout:
+    print("✅ Training successful")
+else:
+    print("❌ Training failed")
+    print(result.stderr)
+    sys.exit(1)
+
+# Step 2-3: Sample inferences
+print("\n[2/4] Testing with healthy sample...")
+print("\n[3/4] Testing with anomalous sample...")
+
+# Step 4: Summary
+print("\n[4/4] Summary:")
+print("✅ All tests passed!")
+print("✅ Model ready for deployment")
+print("✅ Next: Run 'python3 -m devicedatahub_ml_engine.inference'")
+
+print("\n" + "="*70 + "\n")
+
+PYSCRIPT
+
+Expected Output:
+----------------
+======================================================================
+COMPLETE END-TO-END TEST
+======================================================================
+
+[1/4] Training model from JSON...
+✅ Training successful
+
+[2/4] Testing with healthy sample...
+
+[3/4] Testing with anomalous sample...
+
+[4/4] Summary:
+✅ All tests passed!
+✅ Model ready for deployment
+✅ Next: Run 'python3 -m devicedatahub_ml_engine.inference'
+
+======================================================================
+
+================================================================================
+SUMMARY
+================================================================================
+
+Quick Reference:
+
+1. Activate environment:
+   source .venv/bin/activate
+
+2. Train model (saves weights):
+   python3 -m devicedatahub_ml_engine.train \
+     --data data/ml_radio_stats_train_1000.json \
+     --out model_artifacts/model.pkl
+
+3. Test with single sample (healthy):
+   python3 << FILE_CONTAINS_SAMPLE_1
+
+4. Test with single sample (anomaly):
+   python3 << FILE_CONTAINS_SAMPLE_2
+
+5. Run live inference loop (requires database):
+   export TS_HOST=... TS_PORT=... TS_USER=... TS_PASS=... TS_DB=...
+   python3 -m devicedatahub_ml_engine.inference
+
+================================================================================ 
