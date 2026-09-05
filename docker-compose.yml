@@ -1,0 +1,31 @@
+services:
+  ml-engine:
+    build: .
+    container_name: devicedatahub-ml-engine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MODEL_PATH: model_artifacts/model.pkl
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
+      ALERT_THRESHOLD: ${ALERT_THRESHOLD:-0.5}
+      MQTT_ENABLED: ${MQTT_ENABLED:-true}
+      MQTT_HOST: ${MQTT_HOST:-0.tcp.in.ngrok.io}
+      MQTT_PORT: ${MQTT_PORT:-17241}
+      MQTT_BASE_TOPIC: ${MQTT_BASE_TOPIC:-wifi/alerts}
+      TS_HOST: ${TS_HOST:-host.docker.internal}
+      TS_PORT: ${TS_PORT:-5433}
+      TS_USER: ${TS_USER:-postgres}
+      TS_PASS: ${TS_PASS:-postgres}
+      TS_DB: ${TS_DB:-telemetry}
+      DB_HOST: ${DB_HOST:-host.docker.internal}
+      DB_PORT: ${DB_PORT:-5433}
+      DB_NAME: ${DB_NAME:-telemetry}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_TABLE: ${DB_TABLE:-telemetry}
+    volumes:
+      - ./model_artifacts:/app/model_artifacts:ro
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
