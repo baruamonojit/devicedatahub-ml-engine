@@ -147,7 +147,7 @@ class MQTTAlertPublisher:
             return False
 
         topic = f"{self.base_topic}/{device_id}/anomaly"
-        payload = json.dumps(anomaly_data)
+        payload = json.dumps(anomaly_data, default=str)
 
         try:
             result = self.client.publish(topic, payload, qos=1, retain=False)

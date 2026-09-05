@@ -26,5 +26,6 @@ services:
       DB_TABLE: ${DB_TABLE:-telemetry}
     volumes:
       - ./model_artifacts:/app/model_artifacts:ro
+      - ./logs:/app/logs
     extra_hosts:
       - "host.docker.internal:host-gateway"

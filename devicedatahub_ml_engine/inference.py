@@ -1,6 +1,9 @@
+import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,6 +17,35 @@ THRESHOLD = float(os.getenv("ALERT_THRESHOLD", "0.5"))
 MODEL_PATH = os.getenv("MODEL_PATH", "model_artifacts/model.pkl")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 MQTT_ENABLED = os.getenv("MQTT_ENABLED", "true").lower() in ("1", "true", "yes")
+ANOMALY_LOG_DIR = Path(os.getenv("ANOMALY_LOG_DIR", "logs/anomalies"))
+
+
+def json_safe(value):
+    """Convert DB/numpy values into JSON-serializable Python types."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+        return None
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    if pd.isna(value):
+        return None
+    return value
+
+
+def to_jsonable_dict(row_dict):
+    """Normalize a telemetry row dict for JSON logging / MQTT."""
+    return {str(k): json_safe(v) for k, v in row_dict.items()}
 
 
 def prepare_inference_data(row_data):
@@ -60,6 +92,7 @@ def _score_rows(model, model_type, scaler, feature_columns, df):
                 row_dict.get("radio", ""),
                 row_dict.get("timestamp"),
                 row_dict,
+                features_dict,
             )
         )
 
@@ -84,16 +117,39 @@ def _score_rows(model, model_type, scaler, feature_columns, df):
         else:
             probs = (scores > 0).astype(float)
 
-    for (device_id, radio, ts, row_dict), prob in zip(meta, probs):
-        results.append((device_id, radio, ts, float(prob), row_dict))
+    for (device_id, radio, ts, row_dict, features_dict), prob in zip(meta, probs):
+        results.append((device_id, radio, ts, float(prob), row_dict, features_dict))
     return results
+
+
+def _log_anomaly_case(record: dict) -> Path:
+    """
+    Persist full anomaly input for offline replay/testing.
+
+    Writes:
+      - one JSONL line to logs/anomalies/anomalies.jsonl
+      - one detailed JSON file per anomaly under logs/anomalies/
+    """
+    ANOMALY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    safe_device = str(record.get("device_id", "unknown")).replace("/", "_")
+    safe_radio = str(record.get("radio", "na")).replace("/", "_")
+    ts_tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    case_path = ANOMALY_LOG_DIR / f"anomaly_{safe_device}_{safe_radio}_{ts_tag}.json"
+
+    with case_path.open("w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, default=json_safe)
+
+    with (ANOMALY_LOG_DIR / "anomalies.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, default=json_safe) + "\n")
+
+    return case_path
 
 
 def run_loop():
     """Run continuous anomaly detection loop using telemetry data from database."""
-    print("=" * 70)
-    print("Starting Inference Loop (30-second polling)")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print("Starting Inference Loop (30-second polling)", flush=True)
+    print("=" * 70, flush=True)
 
     raw = load_model(MODEL_PATH)
 
@@ -110,14 +166,15 @@ def run_loop():
         scaler = None
         model_version = "unknown"
 
-    print(f"\n📦 Model loaded:")
-    print(f"   - Type: {model_type}")
-    print(f"   - Version: {model_version}")
-    print(f"   - Features: {len(feature_columns)}")
-    print(f"   - Alert threshold: {THRESHOLD}")
-    print(f"   - Poll interval: {POLL_INTERVAL}s")
-    print(f"   - MQTT publishing: {MQTT_ENABLED}")
-    print("=" * 70)
+    print(f"\n📦 Model loaded:", flush=True)
+    print(f"   - Type: {model_type}", flush=True)
+    print(f"   - Version: {model_version}", flush=True)
+    print(f"   - Features: {len(feature_columns)}", flush=True)
+    print(f"   - Alert threshold: {THRESHOLD}", flush=True)
+    print(f"   - Poll interval: {POLL_INTERVAL}s", flush=True)
+    print(f"   - MQTT publishing: {MQTT_ENABLED}", flush=True)
+    print(f"   - Anomaly log dir: {ANOMALY_LOG_DIR}", flush=True)
+    print("=" * 70, flush=True)
 
     mqtt_pub = None
     if MQTT_ENABLED:
@@ -125,12 +182,14 @@ def run_loop():
         if mqtt_pub.connect():
             print(
                 f"   ✅ MQTT connected: "
-                f"{mqtt_pub.broker_host}:{mqtt_pub.broker_port}"
+                f"{mqtt_pub.broker_host}:{mqtt_pub.broker_port}",
+                flush=True,
             )
         else:
             print(
                 "   ⚠️  MQTT connect failed at startup; "
-                "will retry on each anomaly publish"
+                "will retry on each anomaly publish",
+                flush=True,
             )
 
     conn = get_conn()
@@ -139,24 +198,24 @@ def run_loop():
     try:
         while True:
             poll_count += 1
-            print(f"\n[Poll #{poll_count}] Fetching telemetry data...")
+            print(f"\n[Poll #{poll_count}] Fetching telemetry data...", flush=True)
 
             try:
                 rows = fetch_window_features(conn)
             except Exception as e:
-                print(f"   ❌ DB fetch failed: {e}")
+                print(f"   ❌ DB fetch failed: {e}", flush=True)
                 conn = get_conn()
-                print(f"   ⏱️  Next poll in {POLL_INTERVAL}s...")
+                print(f"   ⏱️  Next poll in {POLL_INTERVAL}s...", flush=True)
                 time.sleep(POLL_INTERVAL)
                 continue
 
             df = rows_to_df(rows)
 
             if df.empty:
-                print("   ⚠️  No data returned from database")
+                print("   ⚠️  No data returned from database", flush=True)
             else:
-                print(f"   📊 Fetched {len(df)} device measurements")
-                print(f"\n   🎯 Running anomaly detection...")
+                print(f"   📊 Fetched {len(df)} device measurements", flush=True)
+                print(f"\n   🎯 Running anomaly detection...", flush=True)
 
                 scored = _score_rows(model, model_type, scaler, feature_columns, df)
                 healthy_count = 0
@@ -164,23 +223,54 @@ def run_loop():
                 published = 0
                 now_iso = datetime.now(timezone.utc).isoformat()
 
-                for device_id, radio, ts, prob, row_dict in scored:
+                for device_id, radio, ts, prob, row_dict, features_dict in scored:
                     if prob >= THRESHOLD:
                         anomaly_count += 1
                         print(
                             f"      🚨 ALERT: device={device_id} radio={radio} "
-                            f"anomaly_prob={prob:.4f}"
+                            f"anomaly_prob={prob:.4f}",
+                            flush=True,
                         )
+
+                        input_row = to_jsonable_dict(row_dict)
+                        features = {k: float(features_dict.get(k, 0.0)) for k in feature_columns}
+                        anomaly_record = {
+                            "detected_at": now_iso,
+                            "poll": poll_count,
+                            "device_id": str(device_id),
+                            "radio": str(radio) if radio is not None else "",
+                            "timestamp": json_safe(ts) if ts is not None else now_iso,
+                            "anomaly_prob": float(prob),
+                            "threshold": THRESHOLD,
+                            "model_version": model_version,
+                            "feature_columns": list(feature_columns),
+                            "features": features,
+                            "input_row": input_row,
+                        }
+
+                        case_path = _log_anomaly_case(anomaly_record)
+                        print(
+                            f"      📝 Anomaly input logged: {case_path}",
+                            flush=True,
+                        )
+                        print(
+                            "      🧾 Input details:\n"
+                            + json.dumps(anomaly_record, indent=2, default=json_safe),
+                            flush=True,
+                        )
+
                         if mqtt_pub is not None:
                             payload = {
-                                "device_id": device_id,
-                                "radio": radio,
-                                "timestamp": str(ts) if ts is not None else now_iso,
-                                "anomaly_prob": prob,
+                                "device_id": anomaly_record["device_id"],
+                                "radio": anomaly_record["radio"],
+                                "timestamp": anomaly_record["timestamp"],
+                                "anomaly_prob": anomaly_record["anomaly_prob"],
                                 "threshold": THRESHOLD,
                                 "model_version": model_version,
+                                "features": features,
+                                "input_row": input_row,
                                 "metrics": {
-                                    k: row_dict.get(k)
+                                    k: input_row.get(k)
                                     for k in (
                                         "channel_utilization_pct",
                                         "cca_busy_pct",
@@ -191,7 +281,7 @@ def run_loop():
                                         "client_count",
                                         "active_client_count",
                                     )
-                                    if k in row_dict
+                                    if k in input_row
                                 },
                             }
                             if mqtt_pub.publish_anomaly_alert(device_id, payload):
@@ -199,17 +289,24 @@ def run_loop():
                             mqtt_pub.publish_device_status(
                                 device_id,
                                 "anomaly",
-                                {"timestamp": payload["timestamp"], "anomaly_prob": prob},
+                                {
+                                    "timestamp": anomaly_record["timestamp"],
+                                    "anomaly_prob": float(prob),
+                                },
                             )
                     else:
                         healthy_count += 1
 
                 print(
                     f"   📈 Results: {healthy_count} healthy, "
-                    f"{anomaly_count} anomalies"
+                    f"{anomaly_count} anomalies",
+                    flush=True,
                 )
                 if mqtt_pub is not None:
-                    print(f"   📡 Published {published} anomaly alert(s) to MQTT")
+                    print(
+                        f"   📡 Published {published} anomaly alert(s) to MQTT",
+                        flush=True,
+                    )
                     if mqtt_pub.connected or (
                         mqtt_pub.client is not None and mqtt_pub.client.is_connected()
                     ):
@@ -224,11 +321,11 @@ def run_loop():
                             }
                         )
 
-            print(f"   ⏱️  Next poll in {POLL_INTERVAL}s...")
+            print(f"   ⏱️  Next poll in {POLL_INTERVAL}s...", flush=True)
             time.sleep(POLL_INTERVAL)
 
     except KeyboardInterrupt:
-        print("\n\n⛔ Stopping inference loop")
+        print("\n\n⛔ Stopping inference loop", flush=True)
     finally:
         conn.close()
         if mqtt_pub is not None:

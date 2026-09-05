@@ -25,15 +25,16 @@ def _table_name() -> str:
 
 def fetch_window_features(conn, interval_minutes=None):
     """
-    Fetch window-aggregated telemetry rows for live inference.
+    Fetch the latest telemetry snapshot per (device_id, radio) for inference.
 
-    Returns one row per (device_id, radio) with AVG of ML features over the
-    aggregation window. Only includes groups that have a recent update
-    within the lookback window (new / updated rows since last poll).
+    Important: do NOT average counters like tx_retries/tx_failed over a time
+    window. Training samples are per-message snapshots (e.g. tx_retries=0 on
+    a healthy poll). Averaging mixes stale high values into an otherwise
+    healthy latest row and causes false anomalies.
 
     Env:
-      POLL_LOOKBACK_MINUTES  - require a row newer than this (default 2)
-      WINDOW_MINUTES         - aggregation window size (default 5)
+      POLL_LOOKBACK_MINUTES  - only include devices with a row newer than this
+                               (default 2)
       DB_TABLE / TS_TABLE    - table name (default telemetry)
     """
     lookback = int(
@@ -41,21 +42,33 @@ def fetch_window_features(conn, interval_minutes=None):
         if interval_minutes is not None
         else os.getenv("POLL_LOOKBACK_MINUTES", "2")
     )
-    window = int(os.getenv("WINDOW_MINUTES", "5"))
+    # Keep a slightly wider scan window so DISTINCT ON can pick latest row,
+    # but only return devices that updated within lookback.
+    scan_minutes = max(lookback, int(os.getenv("WINDOW_MINUTES", "5")))
     table = _table_name()
-
-    avg_exprs = ",\n      ".join(f"AVG({col}) AS {col}" for col in ML_FEATURE_COLUMNS)
+    feature_cols = ",\n      ".join(ML_FEATURE_COLUMNS)
 
     sql = f"""
     SELECT
       device_id,
       radio,
-      MAX(timestamp) AS timestamp,
-      {avg_exprs}
-    FROM public.{table}
-    WHERE timestamp > NOW() - INTERVAL '{window} minutes'
-    GROUP BY device_id, radio
-    HAVING MAX(timestamp) > NOW() - INTERVAL '{lookback} minutes'
+      timestamp,
+      {feature_cols}
+    FROM (
+      SELECT
+        device_id,
+        radio,
+        timestamp,
+        {feature_cols},
+        ROW_NUMBER() OVER (
+          PARTITION BY device_id, radio
+          ORDER BY timestamp DESC
+        ) AS rn
+      FROM public.{table}
+      WHERE timestamp > NOW() - INTERVAL '{scan_minutes} minutes'
+    ) ranked
+    WHERE rn = 1
+      AND timestamp > NOW() - INTERVAL '{lookback} minutes'
     ORDER BY device_id, radio;
     """
 
